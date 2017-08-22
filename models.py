@@ -2,8 +2,8 @@ import numpy as np
 import tensorflow as tf
 import math
 
-
-class Plain_Model():
+    
+class Plain_Model(object):
     def __init__(self, sess, model_name, learning_rate):
         self.sess = sess
         self.model_name = model_name
@@ -29,8 +29,7 @@ class Plain_Model():
             self.hypothesis = tf.sigmoid(tf.matmul(L1, W2) + b)
             
         with tf.name_scope('{}_cost'.format(self.model_name)) as scope:
-            self.cost = tf.losses.sigmoid_cross_entropy(logits=hypothesis, multi_class_labels=Y)
-            # self.cost = -tf.reduce_mean(self.Y * tf.log(self.hypothesis + 0.01) + (1 - self.Y) * tf.log(1 - self.hypothesis + 0.01))
+            self.cost = -tf.reduce_mean(self.Y * tf.log(self.hypothesis + 0.01) + (1 - self.Y) * tf.log(1 - self.hypothesis + 0.01))
             cost_summary = tf.summary.scalar('cost', self.cost)
             
         with tf.name_scope('{}_train_optimizer'.format(self.model_name)) as scope:
@@ -41,7 +40,7 @@ class Plain_Model():
         accuracy_summary = tf.summary.scalar('{}_accuracy'.format(self.model_name), self.accuracy)
         
     def summary(self, summary_directory):
-        self.summary_directory = summary_directory # ex: './logs/planesnet2_log'
+        self.summary_directory = summary_directory
         self.merged_summary = tf.summary.merge_all()
         self.writer = tf.summary.FileWriter(self.summary_directory)
         self.writer.add_graph(self.sess.graph)
@@ -57,10 +56,11 @@ class Plain_Model():
     
 
 class Resnet_Model(Plain_Model):
-    def __init__(self, sess, model_name, learning_rate):
+    def __init__(self, sess, model_name, learning_rate, keep_prob):
         self.sess = sess
         self.model_name = model_name
         self.learning_rate = learning_rate
+        self.keep_prob = keep_prob
         self._build_net(self.learning_rate)
         
     def _build_net(self, learning_rate):
@@ -101,7 +101,7 @@ class Resnet_Model(Plain_Model):
             R1_2_bn_epsilon1 = 0.001
             RL1 = tf.nn.batch_normalization(RL1, R1_2_bn_mean1, R1_2_bn_var1, R1_2_bn_beta1, 
                                             R1_2_bn_scale1, R1_2_bn_epsilon1, name='Residual_1_batch2')
-            RL1 = tf.nn.relu(RL1, name='residual_1_relu1')
+            RL1 = tf.nn.relu(RL1, name='residual_1_relu2')
             
             RL1 = RL1 + CL1
             
@@ -131,12 +131,18 @@ class Resnet_Model(Plain_Model):
             RL2 = RL2 + R_SC_L1
             
         with tf.variable_scope('{}_reshape'.format(self.model_name)) as scope:
-            FCL1 = tf.reshape(RL2, [-1, 10 * 10 * 32])
+            FCL_reshape = tf.reshape(RL2, [-1, 10 * 10 * 32])
             
         with tf.variable_scope('{}_fully_connected_layer1'.format(self.model_name)) as scope:
-            FCL_W1 = tf.get_variable('FCL_W1', shape=[10 * 10 * 32, 1], initializer=tf.contrib.layers.xavier_initializer()) 
-            FCL_b1 = tf.Variable(tf.random_normal([1]))
-            self.hypothesis = tf.sigmoid(tf.matmul(FCL1, FCL_W1) + FCL_b1)
+            FCL1_W1 = tf.get_variable('FCL_W1', shape=[10 * 10 * 32, 10 * 10 * 32], initializer=tf.contrib.layers.xavier_initializer()) 
+            FCL1_b1 = tf.Variable(tf.random_normal([10 * 10 * 32]))
+            FCL1 = tf.nn.relu(tf.matmul(FCL_reshape, FCL1_W1) + FCL1_b1)
+            FCL1 = tf.nn.dropout(FCL1, keep_prob=self.keep_prob)
+            
+        with tf.variable_scope('{}_fully_connected_layer2'.format(self.model_name)) as scope:
+            FCL2_W1 = tf.get_variable('FCL_W1', shape=[10 * 10 * 32, 1], initializer=tf.contrib.layers.xavier_initializer()) 
+            FCL2_b1 = tf.Variable(tf.random_normal([1]))
+            self.hypothesis = tf.sigmoid(tf.matmul(FCL1, FCL2_W1) + FCL2_b1)
             
         with tf.name_scope('{}_cost'.format(self.model_name)) as scope:
             self.cost = -tf.reduce_mean(self.Y * tf.log(self.hypothesis + 0.00001) + (1 - self.Y) * tf.log(1 - self.hypothesis + 0.00001))
@@ -148,9 +154,11 @@ class Resnet_Model(Plain_Model):
         self.predicted = tf.cast(self.hypothesis > 0.5, dtype=tf.float32)
         self.accuracy = tf.reduce_mean(tf.cast(tf.equal(self.predicted, self.Y), dtype=tf.float32))
         accuracy_summary = tf.summary.scalar('{}_accuracy'.format(self.model_name), self.accuracy)
+      
+    
         
 
-class Model_Training():
+class Model_Training(object):
     def __init__(self, model_instance, train_data, train_labels, test_data, test_labels):
         self.model_instance = model_instance
         self.sess = model_instance.sess
@@ -173,11 +181,11 @@ class Model_Training():
         
     def model_saver(self, directory, saver):
         self.saver = saver # tf.train.Saver()
-        self.save_directory = directory # "./model_saver/planenet3_model_saver/planenet3_model_save"
+        self.save_directory = directory 
         
     def model_restore(self, directory, saver):
         self.restore = saver # tf.train.Saver()
-        self.restore_directory = directory # "./model_saver/planenet3_model_saver/planenet3_model_save"
+        self.restore_directory = directory 
     
     def train_model(self, epoch, init=tf.global_variables_initializer()):
         self.init = init
@@ -189,18 +197,28 @@ class Model_Training():
         self.coord = tf.train.Coordinator()
         self.threads = tf.train.start_queue_runners(sess=self.sess, coord=self.coord)
         
+        self.cost_list = list()
+        self.train_acc_list = list()
+        self.test_acc_list = list()
+        
         for epoch_step in range(epoch):
             total_cost = 0
             for batch_step in range(self.batch_steps):
                 x_batch, y_batch = self.sess.run([self.train_data_batch, self.train_labels_batch])
-                cost_val, _, summary = plain_model.train(x_data=x_batch, y_data=y_batch)
+                cost_val, _, summary = self.model_instance.train(x_data=x_batch, y_data=y_batch)
                 self.model_instance.writer.add_summary(summary, global_step=epoch_step)
                 total_cost += cost_val
-            self.cost = total_cost / self.batch_size
+            cost = total_cost / self.batch_size
+            self.cost_list.append(cost)
+            train_acc = self.model_instance.get_accuracy(x_test=self.train_data, y_test=self.train_labels)
+            test_acc = self.model_instance.get_accuracy(x_test=self.test_data, y_test=self.test_labels)
+            self.train_acc_list.append(train_acc)
+            self.test_acc_list.append(test_acc)
+            
             print('Epoch:', '%04d' % (epoch_step + 1),
-                  'Avg. cost =', '{:.5f}'.format(self.cost), 
-                  'Train Accuracy: ', '{:.6f}'.format(self.model_instance.get_accuracy(x_test=self.train_data, y_test=self.train_labels)),
-                  'Test Accuracy: ', '{:.6f}'.format(self.model_instance.get_accuracy(x_test=self.test_data, y_test=self.test_labels)))
+                  'Avg. cost =', '{:.5f}'.format(cost), 
+                  'Train Accuracy: ', '{:.6f}'.format(train_acc),
+                  'Test Accuracy: ', '{:.6f}'.format(test_acc))
             
         self.coord.request_stop()
         self.coord.join(self.threads)
@@ -218,20 +236,32 @@ class Model_Training():
         self.coord = tf.train.Coordinator()
         self.threads = tf.train.start_queue_runners(sess=self.sess, coord=self.coord)
         
+        self.cost_list = list()
+        self.train_acc_list = list()
+        self.test_acc_list = list()
+        
         for epoch_step in range(epoch):
             total_cost = 0
             for batch_step in range(self.batch_steps):
                 x_batch, y_batch = self.sess.run([self.train_data_batch, self.train_labels_batch])
-                cost_val, _, summary = plain_model.train(x_data=x_batch, y_data=y_batch)
+                cost_val, _, summary = self.model_instance.train(x_data=x_batch, y_data=y_batch)
                 self.model_instance.writer.add_summary(summary, global_step=epoch_step)
                 total_cost += cost_val
-            self.cost = total_cost / self.batch_size
+            cost = total_cost / self.batch_size
+            self.cost_list.append(cost)
+            train_acc = self.model_instance.get_accuracy(x_test=self.train_data, y_test=self.train_labels)
+            test_acc = self.model_instance.get_accuracy(x_test=self.test_data, y_test=self.test_labels)
+            self.train_acc_list.append(train_acc)
+            self.test_acc_list.append(test_acc)
+            
             print('Epoch:', '%04d' % (epoch_step + 1),
-                  'Avg. cost =', '{:.5f}'.format(self.cost), 
-                  'Train Accuracy: ', '{:.6f}'.format(self.model_instance.get_accuracy(x_test=self.train_data, y_test=self.train_labels)),
-                  'Test Accuracy: ', '{:.6f}'.format(self.model_instance.get_accuracy(x_test=self.test_data, y_test=self.test_labels)))
+                  'Avg. cost =', '{:.5f}'.format(cost), 
+                  'Train Accuracy: ', '{:.6f}'.format(train_acc),
+                  'Test Accuracy: ', '{:.6f}'.format(test_acc))
             
         self.coord.request_stop()
         self.coord.join(self.threads)
         save_path = self.saver.save(self.sess, self.save_directory)
         print("Model saved in file: %s" % save_path)
+
+        
