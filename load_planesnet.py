@@ -2,7 +2,6 @@ import numpy as np
 import gzip
 import pickle
 
-
 def load_planesnet(file, train_size, seed=None): # file: r'planesnet.pklz'
     with gzip.open(file, 'rb') as f:
         planesnet = pickle.load(f, encoding='latin1')
